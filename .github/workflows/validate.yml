@@ -1,0 +1,122 @@
+name: validate
+
+# pull_request, never pull_request_target: pull_request_target runs with this
+# repository's secrets and write token, and what it would run here is a
+# stranger's pull request. The repository check needs neither.
+on:
+  # Only pull requests into main. The fallback below -- a base with no check,
+  # judged by the pull request's own copy -- is meant for the one pull request
+  # that brings the check into main; into any other branch it would be every
+  # pull request's way around the check.
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: validate-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # Branch protection on main requires a check named "validate" -- this job.
+  # Renaming it quietly turns that requirement into one nothing can satisfy.
+  validate:
+    name: validate
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Every commit of a pull request is signed off, so the check needs
+          # the history between its base and its head, not only the merge.
+          fetch-depth: 0
+          persist-credentials: false
+
+      # A pull request is judged by the check its base has, never by its own
+      # copy: one that weakened check-repo.py, or the tests that hold it to its
+      # rules, would otherwise pass by the check it brought. The base's
+      # .github/scripts/ and LICENSE (the tests read the Apache text from it)
+      # are read out of git into a folder of their own, laid out as in the
+      # repository, and everything below runs from there against the pull
+      # request's commits. Only when the base has no check at all -- the very
+      # first pull request into main -- is the head's copy used, and the log
+      # says so. A push to main is checked by main's own copy, read out of git
+      # the same way: it is the base of what comes next.
+      #
+      # Nothing of the pull request's runs before its verdict, so nothing of it
+      # can reach these steps. Python is started isolated (-I: no current folder
+      # and no script folder on the import path, no PYTHON* variables, no user
+      # site) from inside that folder, never from the checkout -- run from the
+      # checkout, a unittest/ or a tempfile.py at the top of a pull request is
+      # imported in place of the standard library's, runs its own code, and can
+      # write the next step's environment through GITHUB_ENV. For the same
+      # reason no step takes a path from that environment: each spells out the
+      # folder it reads, from `runner.temp` and `github.workspace`. Blobs are
+      # read with cat-file, which applies no attributes of the checkout.
+      #
+      # What none of this can do: this file itself is the pull request's.
+      # GitHub runs a pull_request workflow as the pull request has it, so a
+      # pull request can rewrite every step above and below. What stops that is
+      # the owner's review -- CODEOWNERS puts every file, .github/ included, in
+      # front of him, and branch protection on main lets only the maintainers
+      # merge, so merging is the review -- not this workflow.
+      - name: Take the check from the base
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE: ${{ github.event.pull_request.base.sha }}
+          ROOT: ${{ runner.temp }}/base-check
+        run: |
+          set -eu
+          if [ "$EVENT" = pull_request ]; then
+            from=$BASE
+          else
+            from=$(git rev-parse --verify HEAD^{commit})
+            echo "A push to main: checked by its own copy of the check."
+          fi
+          rm -rf "$ROOT"
+          mkdir -p "$ROOT/.github/scripts"
+          if git cat-file -e "$from:.github/scripts/check-repo.py" 2>/dev/null; then
+            git ls-tree "$from" .github/scripts/ | while read -r mode type object path; do
+              [ "$type" = blob ] || continue
+              git cat-file blob "$object" > "$ROOT/$path"
+            done
+            git cat-file blob "$from:LICENSE" > "$ROOT/LICENSE"
+            echo "The check and its tests are $from's:"
+          else
+            echo "::warning::The base, $from, has no .github/scripts/check-repo.py, so this pull request is checked by its own copy of the check and its tests. That happens once, for the pull request that brings the check into main; every later one is judged by the check already there."
+            head=$(git rev-parse --verify HEAD^{commit})
+            git ls-tree "$head" .github/scripts/ | while read -r mode type object path; do
+              [ "$type" = blob ] || continue
+              git cat-file blob "$object" > "$ROOT/$path"
+            done
+            git cat-file blob "$head:LICENSE" > "$ROOT/LICENSE"
+            echo "The check and its tests are this pull request's own:"
+          fi
+          ls -l "$ROOT/.github/scripts"
+
+      # The check is only as good as its own tests: a rule that stopped
+      # firing looks exactly like a repository that obeys it.
+      - name: Test the repository check
+        env:
+          ROOT: ${{ runner.temp }}/base-check
+        run: |
+          cd "$ROOT"
+          python3 -I -B -m unittest discover -s "$ROOT/.github/scripts" -p 'test_*.py' -v
+
+      - name: Check the repository
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+          ROOT: ${{ runner.temp }}/base-check
+          REPO: ${{ github.workspace }}
+        run: |
+          cd "$ROOT"
+          if [ "$EVENT" = pull_request ]; then
+            python3 -I -B "$ROOT/.github/scripts/check-repo.py" --repo "$REPO" --official --base "$BASE" --head "$HEAD"
+          else
+            python3 -I -B "$ROOT/.github/scripts/check-repo.py" --repo "$REPO" --official
+          fi

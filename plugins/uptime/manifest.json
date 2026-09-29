@@ -1,0 +1,15 @@
+{
+  "id": "uptime",
+  "name": "Uptime",
+  "version": "1.0.0",
+  "api": 1,
+  "kind": "poll",
+  "description": "How long this Mac has been up, its load averages, and how many times the card has run since it was installed.",
+  "author": "Ilya Volkov",
+  "run": ["./uptime.sh"],
+  "interval": 60,
+  "timeout": 2,
+  "permissions": {
+    "exec": ["sysctl"]
+  }
+}
