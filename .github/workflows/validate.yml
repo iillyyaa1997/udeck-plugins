@@ -4,10 +4,11 @@ name: validate
 # repository's secrets and write token, and what it would run here is a
 # stranger's pull request. The repository check needs neither.
 on:
-  # Only pull requests into main. The fallback below -- a base with no check,
-  # judged by the pull request's own copy -- is meant for the one pull request
-  # that brings the check into main; into any other branch it would be every
-  # pull request's way around the check.
+  # Only pull requests into main. The fallbacks below -- a base with no check,
+  # judged by the pull request's own copy, and a base with no lock file and no
+  # comparison, judged by the pull request's own -- are meant for the pull
+  # requests that bring those into main; into any other branch they would be
+  # every pull request's way around the check.
   pull_request:
     branches: [main]
   push:
@@ -20,6 +21,12 @@ concurrency:
   group: validate-${{ github.ref }}
   cancel-in-progress: true
 
+# GitHub's own bash: bash -eo pipefail, so a command that fails stops its
+# step, inside a pipe too.
+defaults:
+  run:
+    shell: bash
+
 jobs:
   # Branch protection on main requires a check named "validate" -- this job.
   # Renaming it quietly turns that requirement into one nothing can satisfy.
@@ -28,95 +35,614 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      # For pull_request, actions/checkout checks out refs/pull/N/merge,
+      # GitHub's merge of the pull request into main, which the first step
+      # below relies on.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
-          # Every commit of a pull request is signed off, so the check needs
-          # the history between its base and its head, not only the merge.
+          # The whole history: every commit of a pull request is signed off,
+          # so the check reads the commits between its base and its head, and
+          # udeck-plugin check-repo --strict does not pass rule 18 -- a changed
+          # plugin's version goes up -- on a clone that lacks the commit it
+          # compares with.
           fetch-depth: 0
           persist-credentials: false
 
       # A pull request is judged by the check its base has, never by its own
-      # copy: one that weakened check-repo.py, or the tests that hold it to its
-      # rules, would otherwise pass by the check it brought. The base's
-      # .github/scripts/ and LICENSE (the tests read the Apache text from it)
-      # are read out of git into a folder of their own, laid out as in the
-      # repository, and everything below runs from there against the pull
-      # request's commits. Only when the base has no check at all -- the very
-      # first pull request into main -- is the head's copy used, and the log
-      # says so. A push to main is checked by main's own copy, read out of git
-      # the same way: it is the base of what comes next.
+      # copy: one that weakened check-repo.py, compare-checks.py, or the tests
+      # that hold them to their rules, or that named another udeck-plugin in
+      # .github/udeck-plugin.lock, would otherwise pass by the check it
+      # brought. The base's .github/scripts/, its lock file and LICENSE (the
+      # tests read the Apache text from it) are read out of git into a folder
+      # of their own, laid out as in the repository, and everything below
+      # runs from there against the pull request's commits. A push to main is
+      # checked by main's own copy, read out of git the same way: it is the
+      # base of what comes next.
       #
-      # Nothing of the pull request's runs before its verdict, so nothing of it
-      # can reach these steps. Python is started isolated (-I: no current folder
-      # and no script folder on the import path, no PYTHON* variables, no user
-      # site) from inside that folder, never from the checkout -- run from the
+      # The base of a pull request is main as GitHub merged the pull request
+      # into it: what actions/checkout checks out for a pull request is that
+      # merge (refs/pull/N/merge), whose first parent is main as it was when
+      # GitHub made it and whose second is the head. That one commit is where
+      # the check, its tests and the lock file come from, and what rule 18
+      # and the sign-offs compare with -- not the event's
+      # pull_request.base.sha, which can lag behind main: GitHub does not keep
+      # it at main's tip as main moves on, and then rule 18 would hold a
+      # version to a main that has since taken a higher one, and a pull
+      # request opened before the lock file came into main would still find
+      # none there. With "branch must be up to date" on main, the merge GitHub
+      # makes for the head that is merged is made on main's tip. And what a
+      # pull request changes -- the lock file, a file every later pull request
+      # takes from main, the scripts and their tests -- is what that merge
+      # changes against its first parent, not what the head holds: a head
+      # that only lags behind main changes nothing main has taken since.
+      #
+      # Two fallbacks, each for one pull request. When the base has no check
+      # at all -- the very first pull request into main -- the merge's
+      # .github/scripts/, the pull request's own, is used. When the base has
+      # neither the lock file nor the comparison -- the pull request that
+      # brings udeck-plugin in beside check-repo.py -- the merge's lock file,
+      # compare-checks.py and its tests, the pull request's own, are used.
+      # Each says so in the log, with a warning. A base with one of the two
+      # and not the other is no first time: it fails.
+      #
+      # Nothing of the pull request's runs before its verdict, but for those
+      # two fallbacks -- its own scripts and tests, once -- and for a pull
+      # request whose merge changes the lock file, whose release's
+      # udeck-plugin runs too: uDeck's own command, from uDeck's releases,
+      # held to the sum the lock file gives (below). After the verdict, the
+      # last step tries the check, the comparison and their tests as merging
+      # the pull request leaves them, beside the lock file merging leaves,
+      # when merging changes any of them: the pull request's own code, which
+      # can add a failure there and cannot take one away.
+      # Python is started isolated (-I: no current folder and no script
+      # folder on the import path, no PYTHON* variables, no user site) from
+      # inside a folder of its own, never from the checkout -- run from the
       # checkout, a unittest/ or a tempfile.py at the top of a pull request is
-      # imported in place of the standard library's, runs its own code, and can
-      # write the next step's environment through GITHUB_ENV. For the same
-      # reason no step takes a path from that environment: each spells out the
-      # folder it reads, from `runner.temp` and `github.workspace`. Blobs are
-      # read with cat-file, which applies no attributes of the checkout.
+      # imported in place of the standard library's, runs its own code, and
+      # can write the next step's environment through GITHUB_ENV -- and the
+      # tests are loaded as a package (the second step), so that a module
+      # among the scripts is not imported in place of the standard library's
+      # either. For the same reason no step takes a path from that
+      # environment: each spells out the folder it reads, from `runner.temp`
+      # and `github.workspace`, and the commits from this step's outputs.
+      # Blobs are read with cat-file, which applies no attributes of the
+      # checkout, and the check's own files under their exact names
+      # (take_check, below).
       #
-      # What none of this can do: this file itself is the pull request's.
-      # GitHub runs a pull_request workflow as the pull request has it, so a
-      # pull request can rewrite every step above and below. What stops that is
-      # the owner's review -- CODEOWNERS puts every file, .github/ included, in
-      # front of him, and branch protection on main lets only the maintainers
-      # merge, so merging is the review -- not this workflow.
+      # What none of this can guard is this file itself. For pull_request,
+      # GitHub runs the workflow as it is in the commit the event names,
+      # GITHUB_SHA: the merge it makes of the pull request, refs/pull/N/merge.
+      # That is main's copy of this file when the pull request leaves it
+      # alone, and the pull request's change applied to main's when it changes
+      # it -- so a pull request can rewrite every step above and below, for
+      # its own run. What stops that is the owner's review -- CODEOWNERS puts
+      # every file, .github/ included, in front of him, and branch protection
+      # on main lets only the maintainers merge, so merging is the review --
+      # not this workflow.
       - name: Take the check from the base
+        id: base
         env:
           EVENT: ${{ github.event_name }}
-          BASE: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD: ${{ github.event.pull_request.head.sha }}
           ROOT: ${{ runner.temp }}/base-check
         run: |
           set -eu
+          # take_check <commit> <folder>: <commit>'s .github/scripts/ and
+          # LICENSE, laid out in <folder> as in the repository. The entries of
+          # .github/scripts/ are listed by `git ls-tree -z`, into <folder>.list
+          # beside it, so that each name comes out whole -- a trailing space,
+          # a line break -- and each regular file is read under that exact
+          # name; a folder, a symbolic link or a submodule there is left out.
+          # A name outside A-Z a-z 0-9 . _ -, or one that starts with ".",
+          # stops the step -- the characters rule 7 allows in a plugin's
+          # names -- so that no file of the check can stand in for another,
+          # or pass for a workflow command where it is printed. An empty
+          # __init__.py makes the folder the package its tests are loaded from
+          # (the second step).
+          take_check() {
+            listed=$2.list
+            git ls-tree -z "$1" -- .github/scripts/ > "$listed"
+            while IFS= read -r -d '' entry; do
+              path=${entry#*$'\t'}
+              meta=${entry%%$'\t'*}
+              case ${path#.github/scripts/} in
+                .* | *[!ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._-]*)
+                  echo "::error::$1 has $(printf %q "$path"): the check's own files keep to A-Z a-z 0-9 . _ - in their names, and none starts with a dot. Rename it."
+                  exit 1 ;;
+              esac
+              case ${meta%% *} in
+                100644 | 100755) git cat-file blob "${meta##* }" > "$2/$path" ;;
+              esac
+            done < "$listed"
+            rm -f "$listed"
+            git cat-file blob "$1:LICENSE" > "$2/LICENSE"
+            : > "$2/.github/scripts/__init__.py"
+          }
+
+          # regular_file <commit> <path>: <path> is a file at <commit>, with
+          # something in it, one byte or more -- not missing, and not a file
+          # of zero bytes, a folder, a symbolic link or a submodule. What the
+          # bytes are is for the review. (ls-tree --format: git 2.36 or
+          # later.)
+          regular_file() {
+            case $(git ls-tree --format='%(objectmode) %(objectsize)' "$1" -- "$2") in
+              '100644 0' | '100755 0') return 1 ;;
+              '100644 '* | '100755 '*) return 0 ;;
+              *) return 1 ;;
+            esac
+          }
+
+          head=$(git rev-parse --verify 'HEAD^{commit}')
           if [ "$EVENT" = pull_request ]; then
-            from=$BASE
+            from=$(git rev-parse --verify --quiet 'HEAD^1^{commit}') || from=
+            merged=$(git rev-parse --verify --quiet 'HEAD^2^{commit}') || merged=
+            if [ -z "$from" ] || [ "$merged" != "$PR_HEAD" ]; then
+              echo "::error::The checkout, $head, is not GitHub's merge of this pull request's head, $PR_HEAD, into main: its parents are ${from:-none} and ${merged:-none}. Without it, this job cannot tell which commit of main to judge the pull request by."
+              exit 1
+            fi
+            echo "The base is main as GitHub merged this pull request into it: $from."
           else
-            from=$(git rev-parse --verify HEAD^{commit})
+            from=$head
             echo "A push to main: checked by its own copy of the check."
           fi
+          echo "commit=$from" >> "$GITHUB_OUTPUT"
+          echo "merge=$head" >> "$GITHUB_OUTPUT"
           rm -rf "$ROOT"
           mkdir -p "$ROOT/.github/scripts"
           if git cat-file -e "$from:.github/scripts/check-repo.py" 2>/dev/null; then
-            git ls-tree "$from" .github/scripts/ | while read -r mode type object path; do
-              [ "$type" = blob ] || continue
-              git cat-file blob "$object" > "$ROOT/$path"
-            done
-            git cat-file blob "$from:LICENSE" > "$ROOT/LICENSE"
+            take_check "$from" "$ROOT"
             echo "The check and its tests are $from's:"
           else
             echo "::warning::The base, $from, has no .github/scripts/check-repo.py, so this pull request is checked by its own copy of the check and its tests. That happens once, for the pull request that brings the check into main; every later one is judged by the check already there."
-            head=$(git rev-parse --verify HEAD^{commit})
-            git ls-tree "$head" .github/scripts/ | while read -r mode type object path; do
-              [ "$type" = blob ] || continue
-              git cat-file blob "$object" > "$ROOT/$path"
-            done
-            git cat-file blob "$head:LICENSE" > "$ROOT/LICENSE"
+            take_check "$head" "$ROOT"
             echo "The check and its tests are this pull request's own:"
           fi
-          ls -l "$ROOT/.github/scripts"
 
-      # The check is only as good as its own tests: a rule that stopped
-      # firing looks exactly like a repository that obeys it.
-      - name: Test the repository check
+          # The lock file names the udeck-plugin that runs beside the check,
+          # and compare-checks.py holds the two to one answer. They came into
+          # main in one pull request, and each needs the other.
+          lock=.github/udeck-plugin.lock
+          comparison=.github/scripts/compare-checks.py
+          if git cat-file -e "$from:$lock" 2>/dev/null && git cat-file -e "$from:$comparison" 2>/dev/null; then
+            git cat-file blob "$from:$lock" > "$ROOT/$lock"
+            echo "The lock file is $from's too."
+          elif ! git cat-file -e "$from:$lock" 2>/dev/null && ! git cat-file -e "$from:$comparison" 2>/dev/null; then
+            for path in "$lock" "$comparison" .github/scripts/test_compare_checks.py; do
+              if ! regular_file "$head" "$path"; then
+                echo "::error::The base, $from, has no $lock and no $comparison, and merging this pull request does not bring $path either, as a file with something in it: this workflow cannot run without them."
+                exit 1
+              fi
+            done
+            echo "::warning::The base, $from, has no $lock and no $comparison, so the udeck-plugin release this pull request is checked by is the one its own lock file names, and the comparison of the two checks is its own, with its own tests. That happens once, for the pull request that brings them into main; every later one is judged by the lock file and the comparison already there."
+            for path in "$lock" "$comparison" .github/scripts/test_compare_checks.py; do
+              git cat-file blob "$head:$path" > "$ROOT/$path"
+            done
+            echo "The lock file, the comparison and its tests are this pull request's own."
+          else
+            echo "::error::The base, $from, has one of $lock and $comparison and not the other. They came into main together and every pull request needs both: restore the missing one first."
+            exit 1
+          fi
+
+          # What the next pull request takes from main, merging this one has
+          # to leave there. Without the lock file or the comparison on main,
+          # every pull request after it is red, the one restoring them
+          # included, and so without LICENSE; without check-repo.py, the next
+          # one is judged by its own copy; without a test file, the next ones
+          # by a check or a comparison nothing tests. Judged by the merge --
+          # what merging leaves on main -- against its first parent, not by
+          # the pull request's head: a head that only lags behind main lacks
+          # what main took since, and merging it removes nothing. A file moved
+          # elsewhere is a file removed, and so is one left with zero bytes,
+          # or as a folder or a symbolic link in its place: merging has to
+          # leave each as a file with something in it, one byte or more. What
+          # is in it is for the review -- a test file cut down to one test that
+          # always passes, or to a single blank line, is still a test file
+          # here. The pull request that retires check-repo.py changes this
+          # workflow as well.
+          if [ "$EVENT" = pull_request ]; then
+            for path in .github/scripts/check-repo.py .github/scripts/test_check_repo.py \
+                "$comparison" .github/scripts/test_compare_checks.py "$lock" LICENSE; do
+              if git cat-file -e "$from:$path" 2>/dev/null && ! regular_file "$head" "$path"; then
+                echo "::error::Merging this pull request leaves no $path on main as a file with something in it -- it removes it, moves it, empties it, or puts a folder or a symbolic link in its place -- and every pull request after it takes that file from main, with this workflow: keep it."
+                exit 1
+              fi
+            done
+          fi
+          ls -l "$ROOT/.github/scripts" "$ROOT/$lock"
+
+      # The checks are only as good as their own tests: a rule that stopped
+      # firing looks exactly like a repository that obeys it, and a comparison
+      # that stopped comparing like two checks that agree.
+      #
+      # The tests are loaded as the package `scripts`, from .github/ (-t):
+      # unittest puts the folder it loads from first on the import path, and
+      # .github/ here holds nothing else Python can import, so a module among
+      # the scripts named like one of the standard library's -- a
+      # tempfile.py -- is not imported in its place. Each test file loads the
+      # script it tests by its path. A test that starts check-repo.py as a
+      # program, without -I, would put the script's folder first on that
+      # program's import path; PYTHONSAFEPATH keeps it off (Python 3.11 and
+      # later, which ubuntu-latest has; an earlier Python ignores it).
+      - name: Test the repository check and the comparison
         env:
           ROOT: ${{ runner.temp }}/base-check
+          PYTHONSAFEPATH: "1"
         run: |
+          set -eu
           cd "$ROOT"
-          python3 -I -B -m unittest discover -s "$ROOT/.github/scripts" -p 'test_*.py' -v
+          python3 -I -B -m unittest discover -s "$ROOT/.github/scripts" -t "$ROOT/.github" -p 'test_*.py' -v
 
+      # The udeck-plugin the lock file names: the Linux x86_64 archive of
+      # that release of uDeck, held to the sha256 the lock file gives before
+      # anything in it runs, and its command held to the version. The lock
+      # file is read by the reader uDeck's docs/plugin-repository.md gives
+      # ("The lock file"), word for word: by sed, never run, the five lines
+      # `udeck-plugin pin` writes or nothing.
+      #
+      # A pull request that changes the lock file is judged by the base's, and
+      # the lock file merging leaves on main takes effect once merged: from
+      # then on, its release checks main and every pull request after it. So
+      # that release is fetched here as well, the lock file is held to it --
+      # all five lines, by `udeck-plugin pin --check` -- and the next step
+      # runs it on this pull request too. A lock file that cannot be fetched,
+      # that is not what its release has, or whose release would fail this
+      # pull request, is not merged, where it would turn main and every pull
+      # request after it red. The lock file the very first one brings is held
+      # to its release the same way.
+      #
+      # Whether a pull request changes the lock file is a question of what
+      # merging it changes: the merge's lock file against its first parent's,
+      # not the head's. A head that only lags behind a main whose lock file
+      # has moved on changes nothing by merging, and is not checked by the
+      # release main has left behind as well.
+      - name: Fetch the udeck-plugin the lock file names
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE: ${{ steps.base.outputs.commit }}
+          MERGE: ${{ steps.base.outputs.merge }}
+          ROOT: ${{ runner.temp }}/base-check
+          CLI: ${{ runner.temp }}/udeck-plugin
+        run: |
+          set -eu
+          # Reads a lock file as udeck-plugin reads it: the five lines `udeck-plugin pin`
+          # writes, byte for byte, or nothing. Sets version, macos_universal,
+          # linux_x86_64, linux_aarch64 and image; never runs the file.
+          read_udeck_plugin_lock() {
+              udeck_lock_value() {
+                  LC_ALL=C sed -En "s/^$1=($2)\$/\\1/p" "$3"
+              }
+              version=$(udeck_lock_value version '(0|[1-9][0-9]{0,8})\.(0|[1-9][0-9]{0,8})\.(0|[1-9][0-9]{0,8})' "$1")
+              macos_universal=$(udeck_lock_value macos-universal '[0-9a-f]{64}' "$1")
+              linux_x86_64=$(udeck_lock_value linux-x86_64 '[0-9a-f]{64}' "$1")
+              linux_aarch64=$(udeck_lock_value linux-aarch64 '[0-9a-f]{64}' "$1")
+              image=$(udeck_lock_value image 'sha256:[0-9a-f]{64}' "$1")
+              udeck_lock_expected=$(mktemp) || return 1
+              printf 'version=%s\nmacos-universal=%s\nlinux-x86_64=%s\nlinux-aarch64=%s\nimage=%s\n' \
+                  "$version" "$macos_universal" "$linux_x86_64" "$linux_aarch64" "$image" > "$udeck_lock_expected"
+              # Each value matched, and the file is the five lines they make: an empty
+              # value is one that did not match, and a key twice gives two lines.
+              if [ -n "$version" ] && [ -n "$macos_universal" ] && [ -n "$linux_x86_64" ] \
+                  && [ -n "$linux_aarch64" ] && [ -n "$image" ] && cmp -s "$1" "$udeck_lock_expected"; then
+                  rm -f "$udeck_lock_expected"
+                  return 0
+              fi
+              rm -f "$udeck_lock_expected"
+              echo "$1 is not a lock file as udeck-plugin pin writes it; udeck-plugin pin --check says why" >&2
+              return 1
+          }
+
+          # fetch <lock file> <folder>: the Linux x86_64 udeck-plugin the lock
+          # file names, checked, in <folder>/udeck-plugin. Called on its own,
+          # never in a condition, so that every command in it stops the step.
+          fetch() {
+            read_udeck_plugin_lock "$1" || exit 1
+            archive="udeck-plugin-$version-linux-x86_64.tar.gz"
+            rm -rf "$2"
+            mkdir -p "$2"
+            curl -fsSL --proto '=https' --tlsv1.2 --retry 3 -o "$2/$archive" \
+              "https://github.com/iillyyaa1997/udeck/releases/download/v$version/$archive"
+            (cd "$2" && echo "$linux_x86_64  $archive" | sha256sum -c -)
+            tar -xzf "$2/$archive" -C "$2"
+            cp "$2/udeck-plugin-$version-linux-x86_64/udeck-plugin" "$2/udeck-plugin"
+            said=$("$2/udeck-plugin" --version)
+            if [ "$said" != "udeck-plugin $version" ]; then
+              echo "::error::$1 names udeck-plugin $version, and the command in its archive says: $said"
+              exit 1
+            fi
+            echo "udeck-plugin $version, linux-x86_64, sha256 $linux_x86_64"
+          }
+
+          # pin_check <lock file> <udeck-plugin>: the lock file is what its
+          # release has -- the sums of the archives no step here downloads and
+          # the image's digest as well -- as `udeck-plugin pin --check` reads
+          # it: from a folder laid out as a repository, its udeck-plugins.json
+          # beside .github/. Exit status 1 is a lock file that is not, 2 a
+          # release that could not be read; either stops the step.
+          pin_check() {
+            rm -rf "$CLI/pin-check"
+            mkdir -p "$CLI/pin-check/.github"
+            cp "$1" "$CLI/pin-check/.github/udeck-plugin.lock"
+            git cat-file blob "$MERGE:udeck-plugins.json" > "$CLI/pin-check/udeck-plugins.json"
+            checked=0
+            "$2" pin --check --repo "$CLI/pin-check" || checked=$?
+            if [ "$checked" -ne 0 ]; then
+              echo "::error::udeck-plugin pin --check exited $checked on .github/udeck-plugin.lock as merging this pull request leaves it (1: it is not what its release has, 2: the release could not be read). udeck-plugin pin --version <release> writes it."
+              exit 1
+            fi
+          }
+
+          lock=.github/udeck-plugin.lock
+          rm -rf "$CLI"
+          mkdir -p "$CLI"
+          fetch "$ROOT/$lock" "$CLI/base"
+          if [ "$EVENT" = pull_request ]; then
+            git cat-file blob "$MERGE:$lock" > "$CLI/merged.lock"
+            if ! git cat-file -e "$BASE:$lock" 2>/dev/null; then
+              echo "The base has no lock file, so the one above is this pull request's; held to its release:"
+              pin_check "$CLI/merged.lock" "$CLI/base/udeck-plugin"
+            elif ! cmp -s "$CLI/merged.lock" "$ROOT/$lock"; then
+              echo "Merging this pull request changes the lock file; once merged, the release it names checks main and every pull request after it:"
+              fetch "$CLI/merged.lock" "$CLI/next"
+              pin_check "$CLI/merged.lock" "$CLI/next/udeck-plugin"
+            else
+              echo "Merging this pull request leaves the lock file as it is."
+            fi
+          fi
+
+      # Both checks, on the same commit, side by side until they have agreed
+      # long enough for check-repo.py to go (uDeck's
+      # docs/plugin-repository.md, "The official repository"): check-repo.py
+      # from the base, and udeck-plugin check-repo --strict --official, which
+      # also has rules 18-20. Both run, whatever either finds. The job fails
+      # when either finds an error or could not check, and when the two
+      # disagree on the passport and rules 1-17 (compare-checks.py).
+      #
+      # A pull request whose merge changes the lock file is checked as well by
+      # the udeck-plugin that lock file names, which the step above fetched: it
+      # too has to pass, and to agree with check-repo.py by the base's
+      # comparison -- a release with a rule the comparison does not know, or
+      # an output it cannot read, waits for the comparison to learn it first,
+      # in a pull request of its own.
+      #
+      # A pull request is checked at its head, the commit udeck-plugin's
+      # --head names -- not at the merge GitHub checks out, which is no commit
+      # of the pull request, has no sign-off, and would fail rule 17. With
+      # "branch must be up to date" on main, the head holds the same files as
+      # the merge it becomes.
+      #
+      # What the checks print names the pull request's paths, which can hold
+      # anything: it is shown with GitHub's workflow commands stopped, so a
+      # line of it cannot pass for one.
       - name: Check the repository
         env:
           EVENT: ${{ github.event_name }}
-          BASE: ${{ github.event.pull_request.base.sha }}
+          BASE: ${{ steps.base.outputs.commit }}
           HEAD: ${{ github.event.pull_request.head.sha }}
           ROOT: ${{ runner.temp }}/base-check
+          CLI: ${{ runner.temp }}/udeck-plugin
+          OUT: ${{ runner.temp }}/outputs
           REPO: ${{ github.workspace }}
         run: |
+          set -eu
           cd "$ROOT"
+          rm -rf "$OUT"
+          mkdir -p "$OUT"
+          python=0
+          udeck=0
+          agree=0
+          next=0
+          next_agree=0
           if [ "$EVENT" = pull_request ]; then
-            python3 -I -B "$ROOT/.github/scripts/check-repo.py" --repo "$REPO" --official --base "$BASE" --head "$HEAD"
+            python3 -I -B "$ROOT/.github/scripts/check-repo.py" --repo "$REPO" --ref "$HEAD" --official \
+              --base "$BASE" --head "$HEAD" > "$OUT/check-repo.py.txt" || python=$?
+            "$CLI/base/udeck-plugin" check-repo --repo "$REPO" --strict --official \
+              --base "$BASE" --head "$HEAD" > "$OUT/udeck-plugin.txt" || udeck=$?
+            if [ -e "$CLI/next/udeck-plugin" ]; then
+              next_version=$("$CLI/next/udeck-plugin" --version)
+              "$CLI/next/udeck-plugin" check-repo --repo "$REPO" --strict --official \
+                --base "$BASE" --head "$HEAD" > "$OUT/udeck-plugin-next.txt" || next=$?
+            fi
           else
-            python3 -I -B "$ROOT/.github/scripts/check-repo.py" --repo "$REPO" --official
+            python3 -I -B "$ROOT/.github/scripts/check-repo.py" --repo "$REPO" --official \
+              > "$OUT/check-repo.py.txt" || python=$?
+            "$CLI/base/udeck-plugin" check-repo --repo "$REPO" --strict --official \
+              > "$OUT/udeck-plugin.txt" || udeck=$?
           fi
+          token=$(python3 -I -B -c 'import secrets; print(secrets.token_hex(16))')
+          echo "::stop-commands::$token"
+          echo "check-repo.py, exit status $python:"
+          cat "$OUT/check-repo.py.txt"
+          echo
+          echo "udeck-plugin check-repo --strict --official, exit status $udeck:"
+          cat "$OUT/udeck-plugin.txt"
+          echo
+          echo "The two compared:"
+          python3 -I -B "$ROOT/.github/scripts/compare-checks.py" \
+            --check-repo-py "$OUT/check-repo.py.txt" "$python" \
+            --udeck-plugin "$OUT/udeck-plugin.txt" "$udeck" || agree=$?
+          if [ -e "$OUT/udeck-plugin-next.txt" ]; then
+            echo
+            echo "$next_version, which the lock file names once this pull request is merged, check-repo --strict --official, exit status $next:"
+            cat "$OUT/udeck-plugin-next.txt"
+            echo
+            echo "check-repo.py and $next_version compared:"
+            python3 -I -B "$ROOT/.github/scripts/compare-checks.py" \
+              --check-repo-py "$OUT/check-repo.py.txt" "$python" \
+              --udeck-plugin "$OUT/udeck-plugin-next.txt" "$next" || next_agree=$?
+          fi
+          echo "::$token::"
+          if [ "$python" -ne 0 ]; then
+            echo "::error::check-repo.py exited $python: 1 is a repository with errors, 2 one it could not check."
+          fi
+          if [ "$udeck" -ne 0 ]; then
+            echo "::error::udeck-plugin check-repo exited $udeck: 1 is a repository with errors, 2 one it could not check."
+          fi
+          if [ "$agree" -ne 0 ]; then
+            echo "::error::check-repo.py and udeck-plugin check-repo do not agree (compare-checks.py exited $agree: 1 is a disagreement, 2 an output it could not read)."
+          fi
+          if [ "$next" -ne 0 ]; then
+            echo "::error::$next_version, which the lock file names once this pull request is merged, exited $next on it (1 is a repository with errors, 2 one it could not check): merged, the lock file would have it check main and every pull request after it, and fail them."
+          fi
+          if [ "$next_agree" -ne 0 ]; then
+            echo "::error::check-repo.py and $next_version, which the lock file names once this pull request is merged, do not agree (compare-checks.py exited $next_agree: 1 is a disagreement, 2 an output it could not read): change the comparison first, in a pull request of its own."
+          fi
+          if [ "$python" -ne 0 ] || [ "$udeck" -ne 0 ] || [ "$agree" -ne 0 ] \
+              || [ "$next" -ne 0 ] || [ "$next_agree" -ne 0 ]; then
+            exit 1
+          fi
+
+      # The copies of the check and the comparison that judge main's next run
+      # and the pull requests after this one are the ones merging it leaves
+      # on main, beside the lock file merging leaves there. When merging
+      # changes them -- .github/scripts/, or LICENSE, which the tests read --
+      # or changes the lock file, they are tried here first, laid out as the
+      # first step of main's next run lays them out, the merge's lock file
+      # included: their tests, and then check-repo.py and compare-checks.py
+      # themselves, beside the udeck-plugin of the lock file merging leaves
+      # (the release the third step fetched for it, or the base's when merging
+      # leaves the lock file as it is). They run twice: on the merge, the
+      # repository as merging leaves it, as main's next run will check it; and
+      # on this pull request's head, with its base, as the fourth step checks
+      # a pull request -- the way they will check the next one, sign-offs
+      # included. The step fails when any of that would fail one of those runs:
+      # a test, an error either check finds, a disagreement. So copies, or a
+      # release, that fail main as merging leaves it, or a pull request as
+      # this one is checked, are red here, before they are merged -- not main
+      # after it, with the pull requests after it judged by them, the one
+      # undoing them among them.
+      #
+      # That can be the pull request's own code, so it runs last, once the
+      # base's check has given its verdict, from a folder of its own, after
+      # udeck-plugin has run, with what it prints shown with workflow
+      # commands stopped. A step cannot undo the failure of one before it, so
+      # that code can add a failure and cannot take one away. After this
+      # step, only actions/checkout's post step runs: it runs git in the
+      # checkout with the job's environment, and that code can change both
+      # (.git/config, $GITHUB_ENV), so it may run there too -- where, again,
+      # it can add a failure and cannot take one away. This step does not run
+      # on a push to main, whose own copies the steps above ran.
+      - name: Try the check and the comparison as merging leaves them
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE: ${{ steps.base.outputs.commit }}
+          MERGE: ${{ steps.base.outputs.merge }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+          CLI: ${{ runner.temp }}/udeck-plugin
+          NEXT: ${{ runner.temp }}/merged-check
+          TRY: ${{ runner.temp }}/merged-outputs
+          REPO: ${{ github.workspace }}
+          PYTHONSAFEPATH: "1"
+        run: |
+          set -eu
+          if [ "$EVENT" != pull_request ]; then
+            echo "A push to main: its own copies of the check and the comparison are the ones the steps above ran."
+            exit 0
+          fi
+          changed=
+          for path in .github/scripts LICENSE; do
+            was=$(git rev-parse --verify --quiet "$BASE:$path") || was=none
+            now=$(git rev-parse --verify --quiet "$MERGE:$path") || now=none
+            [ "$was" = "$now" ] || changed="${changed:+$changed and }$path"
+          done
+          # The third step fetches a second release only when merging changes
+          # the lock file.
+          if [ -e "$CLI/next/udeck-plugin" ]; then
+            changed="${changed:+$changed and }the lock file"
+          fi
+          if [ -z "$changed" ]; then
+            echo "Merging this pull request changes none of .github/scripts/, LICENSE and the lock file: the copies and the release the steps above ran are the ones main keeps."
+            exit 0
+          fi
+
+          # The same as in the first step.
+          take_check() {
+            listed=$2.list
+            git ls-tree -z "$1" -- .github/scripts/ > "$listed"
+            while IFS= read -r -d '' entry; do
+              path=${entry#*$'\t'}
+              meta=${entry%%$'\t'*}
+              case ${path#.github/scripts/} in
+                .* | *[!ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._-]*)
+                  echo "::error::$1 has $(printf %q "$path"): the check's own files keep to A-Z a-z 0-9 . _ - in their names, and none starts with a dot. Rename it."
+                  exit 1 ;;
+              esac
+              case ${meta%% *} in
+                100644 | 100755) git cat-file blob "${meta##* }" > "$2/$path" ;;
+              esac
+            done < "$listed"
+            rm -f "$listed"
+            git cat-file blob "$1:LICENSE" > "$2/LICENSE"
+            : > "$2/.github/scripts/__init__.py"
+          }
+
+          udeck=$CLI/base/udeck-plugin
+          if [ -e "$CLI/next/udeck-plugin" ]; then
+            udeck=$CLI/next/udeck-plugin
+          fi
+          version=$("$udeck" --version)
+          echo "Merging this pull request changes $changed. The check, the comparison and their tests as the merge has them, with its lock file, beside $version, which that lock file names:"
+          rm -rf "$NEXT" "$TRY"
+          mkdir -p "$NEXT/.github/scripts" "$TRY"
+          take_check "$MERGE" "$NEXT"
+          # The merge's lock file, where the first step of main's next run
+          # puts main's, beside the scripts and their tests.
+          git cat-file blob "$MERGE:.github/udeck-plugin.lock" > "$NEXT/.github/udeck-plugin.lock"
+
+          # udeck-plugin first, before any code of the pull request runs. On
+          # the merge without --base and --head, as on a push to main: rule
+          # 18 against the commit before HEAD, the merge's first parent.
+          on_merge=0
+          on_head=0
+          "$udeck" check-repo --repo "$REPO" --strict --official > "$TRY/udeck-plugin.merge.txt" || on_merge=$?
+          "$udeck" check-repo --repo "$REPO" --strict --official \
+            --base "$BASE" --head "$HEAD" > "$TRY/udeck-plugin.head.txt" || on_head=$?
+
+          cd "$NEXT"
+          token=$(python3 -I -B -c 'import secrets; print(secrets.token_hex(16))')
+          tests=0
+          python_merge=0
+          python_head=0
+          agree_merge=0
+          agree_head=0
+          echo "::stop-commands::$token"
+          python3 -I -B -m unittest discover -s "$NEXT/.github/scripts" -t "$NEXT/.github" -p 'test_*.py' -v || tests=$?
+          python3 -I -B "$NEXT/.github/scripts/check-repo.py" --repo "$REPO" --ref "$MERGE" --official \
+            > "$TRY/check-repo.py.merge.txt" || python_merge=$?
+          python3 -I -B "$NEXT/.github/scripts/check-repo.py" --repo "$REPO" --ref "$HEAD" --official \
+            --base "$BASE" --head "$HEAD" > "$TRY/check-repo.py.head.txt" || python_head=$?
+          echo
+          echo "On the merge, as main's next run will check it. check-repo.py, exit status $python_merge:"
+          cat "$TRY/check-repo.py.merge.txt"
+          echo "$version check-repo --strict --official, exit status $on_merge:"
+          cat "$TRY/udeck-plugin.merge.txt"
+          echo "The two compared:"
+          python3 -I -B "$NEXT/.github/scripts/compare-checks.py" \
+            --check-repo-py "$TRY/check-repo.py.merge.txt" "$python_merge" \
+            --udeck-plugin "$TRY/udeck-plugin.merge.txt" "$on_merge" || agree_merge=$?
+          echo
+          echo "On this pull request's head, with its base, as the next pull request will be checked. check-repo.py, exit status $python_head:"
+          cat "$TRY/check-repo.py.head.txt"
+          echo "$version check-repo --strict --official, exit status $on_head:"
+          cat "$TRY/udeck-plugin.head.txt"
+          echo "The two compared:"
+          python3 -I -B "$NEXT/.github/scripts/compare-checks.py" \
+            --check-repo-py "$TRY/check-repo.py.head.txt" "$python_head" \
+            --udeck-plugin "$TRY/udeck-plugin.head.txt" "$on_head" || agree_head=$?
+          echo "::$token::"
+
+          # fail <status> <message>: an error when <status> is not 0.
+          failed=0
+          fail() {
+            if [ "$1" -ne 0 ]; then
+              echo "::error::$2"
+              failed=1
+            fi
+          }
+          fail "$tests" "The tests of .github/scripts/, as merging this pull request leaves them, exited $tests: merged, they would fail main's next run and every pull request's after it."
+          fail "$python_merge" "check-repo.py, as merging this pull request leaves it, exited $python_merge on the merge (1 is a repository with errors, 2 one it could not check): merged, it would fail main's next run."
+          fail "$on_merge" "$version, which the lock file names once this pull request is merged, exited $on_merge on the merge (1 is a repository with errors, 2 one it could not check): merged, it would fail main's next run."
+          fail "$agree_merge" "check-repo.py and $version do not agree on the merge, by compare-checks.py as merging this pull request leaves it (exit status $agree_merge: 1 is a disagreement, 2 an output it could not read): merged, they would fail main's next run."
+          fail "$python_head" "check-repo.py, as merging this pull request leaves it, exited $python_head on this pull request's head (1 is a repository with errors, 2 one it could not check): merged, it would judge pull requests like this one so, the one undoing it among them."
+          fail "$on_head" "$version, which the lock file names once this pull request is merged, exited $on_head on this pull request's head (1 is a repository with errors, 2 one it could not check)."
+          fail "$agree_head" "check-repo.py and $version do not agree on this pull request's head, by compare-checks.py as merging this pull request leaves it (exit status $agree_head: 1 is a disagreement, 2 an output it could not read): merged, they would judge pull requests like this one so, the one undoing them among them."
+          exit "$failed"

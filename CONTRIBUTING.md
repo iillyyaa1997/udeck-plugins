@@ -167,27 +167,67 @@ git push --force-with-lease
 
 ## What the check refuses
 
-Every pull request runs [`.github/scripts/check-repo.py`](.github/scripts/check-repo.py),
-and it must pass before anything is merged. The copy that runs, with its tests,
-is the one at your pull request's base — the check already on `main` — and not
-the one in your branch: a pull request that changes the check is judged by the
-check it changes, and its own version applies from the pull request after it is
-merged. (Only the first pull request into `main`, when `main` has no check yet,
-is checked by its own copy, and the log says so.) The check runs apart from
-your branch's files — isolated Python, started outside the checkout — so a file
-in your branch cannot stand in for part of it. What it cannot guard is the
-workflow itself: GitHub runs `.github/workflows/validate.yml` as your pull
-request has it, so a pull request could rewrite it. What stands in the way is
-the owner's review: `CODEOWNERS` puts every file, `.github/` included, in front
-of him, and branch protection on `main` lets only the maintainers merge — merging
-is the review. A pull request that touches `.github/` is read with that in mind.
+Every pull request runs two checks of the same rules:
+[`.github/scripts/check-repo.py`](.github/scripts/check-repo.py), and
+`udeck-plugin check-repo --strict --official`, from the uDeck release that
+[`.github/udeck-plugin.lock`](.github/udeck-plugin.lock) names. Both must pass,
+and they must say the same of everything they both check —
+[`.github/scripts/compare-checks.py`](.github/scripts/compare-checks.py)
+compares them — before anything is merged. `udeck-plugin` is the check that
+stays: it is built from the code uDeck itself runs, and it has three rules
+`check-repo.py` does not (18–20 below); `check-repo.py` goes once the two have
+agreed long enough. The copies that run — the scripts with their tests, and the
+release the lock file names — are the ones on `main` as GitHub merges your
+pull request into it, the check already there, and not the ones in your
+branch: a pull request that changes the check is judged by the check it
+changes, and its own version applies from the pull request after it is merged.
+When your pull request changes `.github/scripts/`, `LICENSE` or the lock file,
+the copies merging leaves are tried too, last, once the check already there
+has given its verdict: their tests, beside the lock file merging leaves,
+and the two scripts themselves, beside the release that lock file names, on the
+repository as merging leaves it and on your branch's head with its commits.
+They can turn the pull request red, never green: copies or a release that fail
+there would fail `main`'s next run, or pull requests like yours after it, and
+are red before they are merged rather than `main` after it. What a pull
+request changes is what merging it changes — the merge GitHub makes, against
+`main` — so a branch that only lags behind `main` is not taken to change or
+remove what `main` has since changed. A pull request that changes the lock
+file is also checked by the release it names, which has to pass and to agree
+with `check-repo.py` as well, and its lock file has to be what that release
+has (`udeck-plugin pin --check`). A release with a rule the comparison does
+not know waits for the comparison to learn it first, in a pull request of its
+own. A pull request that would take `check-repo.py`, `compare-checks.py`,
+either of their test files, the lock file or `LICENSE` off `main`, or leave
+one of them a file of zero bytes, a folder or a symbolic link, is refused: the
+next pull request takes them from there. What those files hold, down to a
+single blank line, is left to the review. A name in `.github/scripts/` that
+uses anything but `A–Z a–z 0–9 . _ -` or starts with `.` is refused too.
+(Only the first pull request into `main`, when `main` had no check yet, was
+checked by its own copy, and the one that brought the lock file and the
+comparison by its own of those; the log said so.) The checks run apart from
+your branch's files — isolated Python, started outside the checkout, and a
+command whose archive is held to the sum in the lock file before it runs — so a
+file in your branch cannot stand in for part of them. What they cannot guard is
+the workflow itself: GitHub runs `.github/workflows/validate.yml` as its merge
+of your pull request has it — your own version, if you change the file — so a
+pull request could rewrite it. What stands in the way is the owner's review:
+`CODEOWNERS` puts every file, `.github/` included, in front of him, and branch
+protection on `main` lets only the maintainers merge — merging is the review. A
+pull request that touches `.github/` is read with that in mind.
 
-It reads the repository as it is committed, so commit first, then run it
+They read the repository as it is committed, so commit first, then run them
 yourself:
 
 ```sh
 python3 .github/scripts/check-repo.py --official
+udeck-plugin check-repo --strict --official
 ```
+
+`udeck-plugin` comes inside uDeck.app (**Install command** under Settings →
+Plugins), and as an archive for macOS and Linux with every
+[uDeck release](https://github.com/iillyyaa1997/udeck/releases). Before you
+push, `--base origin/main --head HEAD` checks your branch as the pull request
+will be: rule 18 against `main`, and the sign-off of every commit on it.
 
 | # | Refused |
 |---|---|
@@ -209,6 +249,9 @@ python3 .github/scripts/check-repo.py --official
 | 15 | no `author` in the manifest |
 | 16 | a `LICENSE` that is not the copyright line, a blank line and the Apache License 2.0 |
 | 17 | a commit without `Signed-off-by:` |
+| 18 | a plugin whose folder changed and whose `version` did not go up (`udeck-plugin` only) |
+| 19 | a `minUDeck` below the uDeck release that has everything the plugin uses (`udeck-plugin` only; one that does nothing is a warning) |
+| 20 | a `name` or `description`, in the manifest or a translation, that is more than one line or holds a control character (`udeck-plugin` only) |
 
 The rules and the reasons for each are in uDeck's
 [docs/plugin-repository.md](https://github.com/iillyyaa1997/udeck/blob/main/docs/plugin-repository.md).

@@ -95,24 +95,60 @@ refuses.
 
 ## The check
 
-Every pull request into `main`, and every push to `main`, runs
-[`.github/scripts/check-repo.py`](.github/scripts/check-repo.py). It holds
+Every pull request into `main`, and every push to `main`, runs two checks of
+the same rules, side by side:
+[`.github/scripts/check-repo.py`](.github/scripts/check-repo.py), and
+`udeck-plugin check-repo --strict --official` — the command uDeck publishes
+with each release, built from the code uDeck itself runs, from the release
+that [`.github/udeck-plugin.lock`](.github/udeck-plugin.lock) names. They hold
 each plugin to the rules uDeck holds a repository to when it installs from
 it, and to the stricter rules of this repository: every file readable text,
-an author, a licence naming them. Run it yourself before you push:
+an author, a licence naming them. `udeck-plugin` also holds a changed plugin
+to a new version, and checks `minUDeck` and one-line names. A pull request
+passes when both pass and they say the same of everything they both check
+([`compare-checks.py`](.github/scripts/compare-checks.py) compares them);
+once they have agreed long enough, `check-repo.py` goes and `udeck-plugin`
+stays. Run them yourself before you push:
 
 ```sh
 python3 .github/scripts/check-repo.py --official
+udeck-plugin check-repo --strict --official
 ```
 
-A pull request is judged by the check on `main` — the copy of
-`.github/scripts/` at the pull request's base, and its tests — not by a copy
-the pull request brings. Changing the check therefore takes two pull requests:
-one that changes it, reviewed and merged, and the ones it then judges. Only the
-very first pull request into `main`, when `main` has no check yet, is checked by
-its own copy, and the run's log says so. The workflow that runs the check is
-the pull request's own copy, as GitHub runs every `pull_request` workflow — what
-guards it is the owner's review of every file, `.github/` included
+`udeck-plugin` comes inside uDeck.app (**Install command** under Settings →
+Plugins), and as an archive for macOS and Linux with every
+[uDeck release](https://github.com/iillyyaa1997/udeck/releases). It reads the
+history, not only the last commit: in a shallow clone, fetch the rest
+(`git fetch --unshallow`).
+
+A pull request is judged by the check on `main` — `main` as GitHub merges the
+pull request into it: the copy of `.github/scripts/` there, its tests, and the
+release its lock file names — not by a copy the pull request brings. Changing
+the check therefore takes two pull requests: one that changes it, reviewed and
+merged, and the ones it then judges. What a pull request changes is what
+merging it changes, so a branch that only lags behind `main` changes nothing
+`main` has since taken. A pull request that changes the lock file is checked by
+both releases, the one `main` names and the one it names, and its lock file is
+held to its release by `udeck-plugin pin --check`. A pull request that changes
+`.github/scripts/`, `LICENSE` or the lock file has the copies merging leaves
+tried as well, after the check has given its verdict: their tests, beside the
+lock file merging leaves, and `check-repo.py` and `compare-checks.py`
+themselves, beside the release that lock file names, on the repository as
+merging leaves it and on the pull request's head with its commits. Copies or a
+release that fail there would fail `main`'s next run, or pull requests like
+this one after it: the pull request is red before it is merged instead. A pull
+request that would take `check-repo.py`, `compare-checks.py`, either test
+file, the lock file or `LICENSE` off `main`, or leave one of them a file of
+zero bytes, a folder or a symbolic link, is refused (what such a file holds,
+down to a single blank line, is left to the review), and so is a name in
+`.github/scripts/` that uses anything but `A–Z a–z 0–9 . _ -` or starts with
+`.`. Only the very first pull request into `main`, when `main` had no check
+yet, was checked by its own copy, and the pull request that brought the lock
+file and the comparison by its own lock file and comparison; the run's log said
+so each time. The workflow that
+runs the check is the one in GitHub's merge of the pull request — the pull
+request's own version whenever it changes the file — so what guards it is the
+owner's review of every file, `.github/` included
 ([CONTRIBUTING.md](CONTRIBUTING.md#what-the-check-refuses)).
 
 ## Licence
