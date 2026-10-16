@@ -35,8 +35,8 @@ plugin that stopped running shows as stale rather than as current.
 
 ## What it needs and what it runs
 
-Nothing to install. It is POSIX `sh` using only what every Mac has:
-`/usr/sbin/sysctl`, `date`, `sed`, `cat`, `mkdir` and `mv`.
+Nothing to install, and nothing to set up. It is POSIX `sh` using only what
+every Mac has: `/usr/sbin/sysctl`, `date`, `sed`, `cat`, `mkdir` and `mv`.
 
 It writes one file, `runs`, in `UDECK_CACHE_DIR`, and nothing anywhere else —
 not even in its own folder, which has to stay exactly what this repository

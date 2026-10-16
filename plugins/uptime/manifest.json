@@ -1,7 +1,7 @@
 {
   "id": "uptime",
   "name": "Uptime",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "api": 1,
   "kind": "poll",
   "description": "How long this Mac has been up, its load averages, and how many times the card has run since it was installed.",
